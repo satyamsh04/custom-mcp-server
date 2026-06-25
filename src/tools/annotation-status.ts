@@ -1,0 +1,119 @@
+import { z } from "zod";
+import {
+  getDynamoClient,
+  GetCommand,
+  UpdateCommand,
+} from "../clients/dynamo-client.js";
+import { getSlackClient } from "../clients/slack-client.js";
+import { loadConfig } from "../config.js";
+import { createAppError, isAppError } from "../errors.js";
+import type { AuthContext, ToolModule, ToolResult } from "../types.js";
+
+const STATUSES = ["pending", "in_progress", "completed", "rejected"] as const;
+
+export interface AnnotationStatusInput {
+  taskId: string;
+  newStatus?: (typeof STATUSES)[number];
+  notify?: boolean;
+}
+
+export const schema = z
+  .object({
+    taskId: z.string().min(1),
+    newStatus: z.enum(STATUSES).optional(),
+    notify: z.boolean().optional(),
+  })
+  .strict();
+
+const definition = {
+  name: "annotation_status",
+  description:
+    "Read or update an annotation task's status, optionally notifying Slack.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      taskId: {
+        type: "string",
+        minLength: 1,
+        description: "Annotation task identifier (Dynamo 'id')",
+      },
+      newStatus: {
+        type: "string",
+        enum: [...STATUSES],
+        description: "If provided, update the task status",
+      },
+      notify: {
+        type: "boolean",
+        default: false,
+        description: "If true, post the status to Slack",
+      },
+    },
+    required: ["taskId"],
+    additionalProperties: false,
+  },
+};
+
+async function handler(
+  input: AnnotationStatusInput,
+  _ctx: AuthContext,
+): Promise<ToolResult> {
+  const config = loadConfig();
+  const client = getDynamoClient();
+
+  try {
+    const res = await client.send(
+      new GetCommand({
+        TableName: config.dynamoTable,
+        Key: { id: input.taskId },
+      }),
+    );
+
+    if (res.Item === undefined) {
+      throw createAppError(
+        "ANNOTATION_NOT_FOUND",
+        `annotation task "${input.taskId}" not found`,
+        false,
+      );
+    }
+
+    let status =
+      typeof res.Item.status === "string" ? res.Item.status : "unknown";
+    let updatedAt: string | undefined;
+
+    if (input.newStatus !== undefined) {
+      updatedAt = new Date().toISOString();
+      await client.send(
+        new UpdateCommand({
+          TableName: config.dynamoTable,
+          Key: { id: input.taskId },
+          UpdateExpression: "SET #s = :s, updatedAt = :u",
+          ExpressionAttributeNames: { "#s": "status" },
+          ExpressionAttributeValues: {
+            ":s": input.newStatus,
+            ":u": updatedAt,
+          },
+        }),
+      );
+      status = input.newStatus;
+    }
+
+    if (input.notify === true) {
+      await getSlackClient().chat.postMessage({
+        channel: config.slackDefaultChannel,
+        text: `Annotation task ${input.taskId} status: ${status}`,
+      });
+    }
+
+    const payload: Record<string, unknown> = { taskId: input.taskId, status };
+    if (updatedAt !== undefined) payload.updatedAt = updatedAt;
+
+    return { content: [{ type: "text", text: JSON.stringify(payload) }] };
+  } catch (err) {
+    if (isAppError(err)) throw err;
+    const message = err instanceof Error ? err.message : "annotation failed";
+    throw createAppError("ANNOTATION_STATUS_FAILED", message, true);
+  }
+}
+
+const tool: ToolModule<AnnotationStatusInput> = { definition, schema, handler };
+export default tool;
