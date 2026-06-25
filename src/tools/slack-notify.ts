@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getSlackClient } from "../clients/slack-client.js";
 import { loadConfig } from "../config.js";
 import { createAppError, isAppError } from "../errors.js";
+import { sanitizeSlackText } from "../security.js";
 import type { AuthContext, ToolModule, ToolResult } from "../types.js";
 
 export interface SlackNotifyInput {
@@ -47,13 +48,14 @@ async function handler(
   input: SlackNotifyInput,
   _ctx: AuthContext,
 ): Promise<ToolResult> {
+  void _ctx;
   const config = loadConfig();
   const channel = input.channel ?? config.slackDefaultChannel;
 
   try {
     const res = await getSlackClient().chat.postMessage({
       channel,
-      text: input.message,
+      text: sanitizeSlackText(input.message),
       thread_ts: input.threadTs,
     });
 
@@ -77,5 +79,10 @@ async function handler(
   }
 }
 
-const tool: ToolModule<SlackNotifyInput> = { definition, schema, handler };
+const tool: ToolModule<SlackNotifyInput> = {
+  definition,
+  requiredScopes: ["slack:write"],
+  schema,
+  handler,
+};
 export default tool;

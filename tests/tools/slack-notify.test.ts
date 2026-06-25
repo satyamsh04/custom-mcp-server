@@ -20,6 +20,19 @@ beforeEach(() => {
 });
 
 describe("slack_notify", () => {
+  it("declares the slack:write scope", () => {
+    expect(tool.requiredScopes).toEqual(["slack:write"]);
+  });
+
+  it("neutralizes broadcast mentions and angle brackets", async () => {
+    postMessage.mockResolvedValue({ ok: true, ts: "1" });
+    await tool.handler({ message: "hey @channel <script>" }, ctx);
+    const args = postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).not.toContain("@channel");
+    expect(args.text).not.toContain("<");
+    expect(args.text).not.toContain(">");
+  });
+
   it("posts a message and returns ts", async () => {
     postMessage.mockResolvedValue({ ok: true, ts: "168.1", channel: "C1" });
     const res = await tool.handler({ message: "hi" }, ctx);

@@ -9,6 +9,7 @@ const ctx: AuthContext = { subject: "user-1", scopes: ["read"], raw: {} };
 
 function makeStubTool(
   handler: ToolModule["handler"],
+  requiredScopes: string[] = [],
 ): ToolModule {
   return {
     definition: {
@@ -21,6 +22,7 @@ function makeStubTool(
         additionalProperties: false,
       },
     },
+    requiredScopes,
     schema: z.object({ value: z.string() }).strict() as never,
     handler,
   };
@@ -77,6 +79,32 @@ describe("dispatchToolCall pipeline", () => {
     await expect(
       dispatchToolCall("missing", {}, "tok", deps),
     ).rejects.toMatchObject({ code: "UNKNOWN_TOOL" });
+  });
+
+  it("enforces required scopes (FORBIDDEN when missing)", async () => {
+    const handler = jest.fn(async () => ({
+      content: [{ type: "text" as const, text: "ok" }],
+    }));
+    const deps = baseDeps({
+      tools: { stub: makeStubTool(handler, ["admin"]) },
+    });
+    await expect(
+      dispatchToolCall("stub", { value: "x" }, "tok", deps),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("checks tool existence before consuming rate-limit budget", async () => {
+    // Unknown tool names must not grow limiter state (DoS guard).
+    const deps = baseDeps({ rateLimiter: createRateLimiter(1) });
+    await expect(
+      dispatchToolCall("missing", {}, "tok", deps),
+    ).rejects.toMatchObject({ code: "UNKNOWN_TOOL" });
+    // The known tool still has its full budget.
+    await dispatchToolCall("stub", { value: "x" }, "tok", deps);
+    await expect(
+      dispatchToolCall("stub", { value: "x" }, "tok", deps),
+    ).rejects.toMatchObject({ code: "RATE_LIMITED" });
   });
 
   it("retries a retryable handler error then succeeds", async () => {
