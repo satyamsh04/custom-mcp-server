@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getDynamoClient, PutCommand } from "../clients/dynamo-client.js";
 import { loadConfig } from "../config.js";
 import { createAppError, isAppError } from "../errors.js";
+import { MAX_ITEM_BYTES, OWNER_ATTR } from "../security.js";
 import type { AuthContext, ToolModule, ToolResult } from "../types.js";
 
 export interface DynamoWriteInput {
@@ -47,20 +48,37 @@ const definition = {
 
 async function handler(
   input: DynamoWriteInput,
-  _ctx: AuthContext,
+  ctx: AuthContext,
 ): Promise<ToolResult> {
   const config = loadConfig();
   const overwrite = input.overwrite ?? true;
-  const item = { id: input.id, ...input.attributes };
+  // Owner is stamped last so a caller cannot spoof it via `attributes`.
+  const item = { ...input.attributes, id: input.id, [OWNER_ATTR]: ctx.subject };
+
+  // Guard against oversized items (DynamoDB hard-limits at 400 KB; we cap
+  // lower). Rough byte estimate via JSON serialization of the attributes.
+  if (Buffer.byteLength(JSON.stringify(item), "utf8") > MAX_ITEM_BYTES) {
+    throw createAppError(
+      "PAYLOAD_TOO_LARGE",
+      `item exceeds ${MAX_ITEM_BYTES} bytes`,
+      false,
+    );
+  }
+
+  // overwrite=false → create-only (fail if id exists at all).
+  // overwrite=true  → create OR update only records the caller owns.
+  const condition = overwrite
+    ? "attribute_not_exists(id) OR #owner = :owner"
+    : "attribute_not_exists(id)";
 
   try {
     await getDynamoClient().send(
       new PutCommand({
         TableName: config.dynamoTable,
         Item: item,
-        ...(overwrite
-          ? {}
-          : { ConditionExpression: "attribute_not_exists(id)" }),
+        ConditionExpression: condition,
+        ExpressionAttributeNames: { "#owner": OWNER_ATTR },
+        ExpressionAttributeValues: { ":owner": ctx.subject },
       }),
     );
 
@@ -74,6 +92,15 @@ async function handler(
     const name = err instanceof Error ? err.name : "";
     const message = err instanceof Error ? err.message : "write failed";
     if (name === "ConditionalCheckFailedException") {
+      // With overwrite, a failure means the record exists and is owned by
+      // someone else (authorization). Without it, the id simply already exists.
+      if (overwrite) {
+        throw createAppError(
+          "FORBIDDEN",
+          `not authorized to overwrite record "${input.id}"`,
+          false,
+        );
+      }
       throw createAppError(
         "DYNAMO_CONFLICT",
         `record "${input.id}" already exists`,
@@ -84,5 +111,10 @@ async function handler(
   }
 }
 
-const tool: ToolModule<DynamoWriteInput> = { definition, schema, handler };
+const tool: ToolModule<DynamoWriteInput> = {
+  definition,
+  requiredScopes: ["dynamo:write"],
+  schema,
+  handler,
+};
 export default tool;

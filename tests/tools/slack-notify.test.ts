@@ -10,7 +10,9 @@ jest.unstable_mockModule("../../src/clients/slack-client.js", () => ({
   getSlackClient: () => ({ chat: { postMessage } }),
 }));
 
-const { default: tool } = await import("../../src/tools/slack-notify.js");
+const { default: tool, schema } = await import(
+  "../../src/tools/slack-notify.js"
+);
 
 const ctx: AuthContext = { subject: "user-1", scopes: [], raw: {} };
 
@@ -20,6 +22,31 @@ beforeEach(() => {
 });
 
 describe("slack_notify", () => {
+  it("declares the slack:write scope", () => {
+    expect(tool.requiredScopes).toEqual(["slack:write"]);
+  });
+
+  it("escapes markup and neutralizes broadcast mentions / link injection", async () => {
+    postMessage.mockResolvedValue({ ok: true, ts: "1" });
+    await tool.handler(
+      { message: "hey @channel <javascript:alert(1)|click> & done" },
+      ctx,
+    );
+    const args = postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).not.toContain("@channel");
+    // Angle brackets are escaped (not deleted) so no Slack link can form.
+    expect(args.text).not.toContain("<");
+    expect(args.text).not.toContain(">");
+    expect(args.text).toContain("&lt;");
+    expect(args.text).toContain("&gt;");
+    expect(args.text).toContain("&amp;");
+  });
+
+  it("rejects messages over the max length via schema", () => {
+    const parsed = schema.safeParse({ message: "a".repeat(4001) });
+    expect(parsed.success).toBe(false);
+  });
+
   it("posts a message and returns ts", async () => {
     postMessage.mockResolvedValue({ ok: true, ts: "168.1", channel: "C1" });
     const res = await tool.handler({ message: "hi" }, ctx);

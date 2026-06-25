@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getSlackClient } from "../clients/slack-client.js";
 import { loadConfig } from "../config.js";
 import { createAppError, isAppError } from "../errors.js";
+import { sanitizeSlackText } from "../security.js";
 import type { AuthContext, ToolModule, ToolResult } from "../types.js";
 
 export interface SlackNotifyInput {
@@ -10,9 +11,12 @@ export interface SlackNotifyInput {
   threadTs?: string;
 }
 
+// 4000 chars is a sane notification cap well under Slack's 40k hard limit.
+const MAX_MESSAGE_CHARS = 4000;
+
 export const schema = z
   .object({
-    message: z.string().min(1),
+    message: z.string().min(1).max(MAX_MESSAGE_CHARS),
     channel: z.string().optional(),
     threadTs: z.string().optional(),
   })
@@ -27,6 +31,7 @@ const definition = {
       message: {
         type: "string",
         minLength: 1,
+        maxLength: MAX_MESSAGE_CHARS,
         description: "Text to post to Slack",
       },
       channel: {
@@ -53,7 +58,7 @@ async function handler(
   try {
     const res = await getSlackClient().chat.postMessage({
       channel,
-      text: input.message,
+      text: sanitizeSlackText(input.message),
       thread_ts: input.threadTs,
     });
 
@@ -77,5 +82,10 @@ async function handler(
   }
 }
 
-const tool: ToolModule<SlackNotifyInput> = { definition, schema, handler };
+const tool: ToolModule<SlackNotifyInput> = {
+  definition,
+  requiredScopes: ["slack:write"],
+  schema,
+  handler,
+};
 export default tool;

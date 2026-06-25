@@ -2,7 +2,7 @@ import jwt from "jsonwebtoken";
 import { extractBearerToken, validateJwt } from "../../src/auth/oauth.js";
 import { isAppError } from "../../src/errors.js";
 
-const SECRET = "test-secret";
+const SECRET = "test-secret-at-least-32-characters-long";
 const ISSUER = "https://auth.example.com/";
 const AUDIENCE = "custom-mcp-server";
 
@@ -82,5 +82,34 @@ describe("validateJwt", () => {
     await expect(validateJwt("not-a-jwt")).rejects.toMatchObject({
       code: "AUTH_INVALID",
     });
+  });
+
+  it("rejects a token whose alg does not match the pinned algorithm", async () => {
+    // Secret is configured → HS256 is pinned; an HS384 token must be refused.
+    const token = signToken({}, { algorithm: "HS384" });
+    await expect(validateJwt(token)).rejects.toMatchObject({
+      code: "AUTH_INVALID",
+    });
+  });
+
+  it("rejects a symmetric secret shorter than 32 characters", async () => {
+    process.env.JWT_SECRET = "too-short";
+    const token = signToken({});
+    await expect(validateJwt(token)).rejects.toMatchObject({
+      code: "AUTH_INVALID",
+    });
+  });
+
+  it("refuses HS256 (JWT_SECRET) in production", async () => {
+    const prevEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    const token = signToken({});
+    try {
+      await expect(validateJwt(token)).rejects.toMatchObject({
+        code: "AUTH_INVALID",
+      });
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+    }
   });
 });

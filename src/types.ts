@@ -33,6 +33,8 @@ export interface AuthContext {
 // Each tool file exports this shape
 export interface ToolModule<TInput = unknown> {
   definition: ToolDefinition;
+  // scopes the caller's JWT must hold to invoke this tool (authorization)
+  requiredScopes: string[];
   // zod schema the server parses input against before invoking the handler
   schema: ZodType<TInput>;
   // validated input is guaranteed to match the zod schema before handler runs

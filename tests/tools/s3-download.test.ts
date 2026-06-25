@@ -14,13 +14,18 @@ beforeEach(() => {
 });
 
 describe("s3_download", () => {
-  it("returns base64 of the object body", async () => {
+  it("declares the s3:read scope", () => {
+    expect(tool.requiredScopes).toEqual(["s3:read"]);
+  });
+
+  it("returns base64 of the object body from the caller's prefix", async () => {
     const data = Buffer.from("hello world");
     s3Mock.on(GetObjectCommand).resolves({
       Body: {
         transformToByteArray: async () => new Uint8Array(data),
       } as never,
       ContentType: "text/plain",
+      ContentLength: data.byteLength,
     });
 
     const res = await tool.handler({ key: "a/b.txt" }, ctx);
@@ -29,6 +34,23 @@ describe("s3_download", () => {
       "hello world",
     );
     expect(payload.contentType).toBe("text/plain");
+    expect(payload.key).toBe("user-1/a/b.txt");
+    const calls = s3Mock.commandCalls(GetObjectCommand);
+    expect(calls[0]!.args[0].input.Key).toBe("user-1/a/b.txt");
+  });
+
+  it("rejects objects larger than the size cap (via ContentLength)", async () => {
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: { transformToByteArray: async () => new Uint8Array() } as never,
+      ContentLength: 11 * 1024 * 1024,
+    });
+    try {
+      await tool.handler({ key: "big.bin" }, ctx);
+      fail("expected PAYLOAD_TOO_LARGE");
+    } catch (e) {
+      expect(isAppError(e)).toBe(true);
+      if (isAppError(e)) expect(e.code).toBe("PAYLOAD_TOO_LARGE");
+    }
   });
 
   it("throws S3_DOWNLOAD_FAILED retryable:false on NoSuchKey", async () => {
@@ -45,14 +67,5 @@ describe("s3_download", () => {
         expect(e.retryable).toBe(false);
       }
     }
-  });
-
-  it("honors the override bucket", async () => {
-    s3Mock.on(GetObjectCommand).resolves({
-      Body: { transformToByteArray: async () => new Uint8Array() } as never,
-    });
-    await tool.handler({ key: "k", bucket: "other" }, ctx);
-    const calls = s3Mock.commandCalls(GetObjectCommand);
-    expect(calls[0]!.args[0].input.Bucket).toBe("other");
   });
 });

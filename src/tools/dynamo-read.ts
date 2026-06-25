@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getDynamoClient, GetCommand } from "../clients/dynamo-client.js";
 import { loadConfig } from "../config.js";
 import { createAppError, isAppError } from "../errors.js";
+import { OWNER_ATTR } from "../security.js";
 import type { AuthContext, ToolModule, ToolResult } from "../types.js";
 
 export interface DynamoReadInput {
@@ -40,7 +41,7 @@ const definition = {
 
 async function handler(
   input: DynamoReadInput,
-  _ctx: AuthContext,
+  ctx: AuthContext,
 ): Promise<ToolResult> {
   const config = loadConfig();
 
@@ -53,14 +54,19 @@ async function handler(
       }),
     );
 
-    if (res.Item === undefined) {
+    // Ownership check. A record owned by another principal is reported as
+    // not-found so callers cannot enumerate foreign record IDs.
+    if (res.Item === undefined || res.Item[OWNER_ATTR] !== ctx.subject) {
       return {
         content: [{ type: "text", text: JSON.stringify({ found: false }) }],
       };
     }
 
+    // Do not echo the internal ownership attribute back to the caller.
+    const { [OWNER_ATTR]: _owner, ...item } = res.Item;
+
     return {
-      content: [{ type: "text", text: JSON.stringify(res.Item) }],
+      content: [{ type: "text", text: JSON.stringify(item) }],
     };
   } catch (err) {
     if (isAppError(err)) throw err;
@@ -69,5 +75,10 @@ async function handler(
   }
 }
 
-const tool: ToolModule<DynamoReadInput> = { definition, schema, handler };
+const tool: ToolModule<DynamoReadInput> = {
+  definition,
+  requiredScopes: ["dynamo:read"],
+  schema,
+  handler,
+};
 export default tool;

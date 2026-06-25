@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -6,13 +7,17 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { tools as defaultTools } from "./tools/index.js";
-import { validateJwt as defaultValidateJwt } from "./auth/oauth.js";
+import {
+  validateJwt as defaultValidateJwt,
+  extractBearerToken,
+} from "./auth/oauth.js";
 import {
   createRateLimiter,
   type RateLimiter,
 } from "./middleware/rate-limiter.js";
 import { withRetry } from "./middleware/retry.js";
 import { loadConfig } from "./config.js";
+import { assertScopes } from "./security.js";
 import { createAppError, isAppError } from "./errors.js";
 import { log } from "./logger.js";
 import type { AuthContext, ToolModule, ToolResult } from "./types.js";
@@ -24,27 +29,32 @@ export interface DispatchDeps {
   retryOptions?: { maxAttempts?: number; baseDelayMs?: number };
 }
 
-// Single tool-call pipeline: auth → rate limit → validate → retry(handler).
-// Exported so it can be unit-tested without a transport.
+// Single tool-call pipeline: auth → lookup → authorize → rate limit →
+// validate input → retry(handler). Exported so it can be unit-tested without a
+// transport.
 export async function dispatchToolCall(
   name: string,
   args: unknown,
   token: string,
   deps: DispatchDeps,
 ): Promise<ToolResult> {
-  // 1. Auth on every call.
+  // 1. Authenticate on every call.
   const ctx = await deps.validate(token);
 
-  // 2. Rate limit per tool.
-  deps.rateLimiter.check(name);
-
-  // 3. Look up the tool (guarded for noUncheckedIndexedAccess).
+  // 2. Look up the tool BEFORE rate limiting so unknown (attacker-controlled)
+  //    names can't grow limiter state unbounded.
   const tool = deps.tools[name];
   if (tool === undefined) {
     throw createAppError("UNKNOWN_TOOL", `unknown tool "${name}"`, false);
   }
 
-  // 4. Validate input.
+  // 3. Authorize: caller must hold the tool's required scopes.
+  assertScopes(ctx, tool.requiredScopes);
+
+  // 4. Rate limit per principal+tool, so one caller can't starve others.
+  deps.rateLimiter.check(`${ctx.subject}:${name}`);
+
+  // 5. Validate input.
   const parseResult = tool.schema.safeParse(args ?? {});
   if (!parseResult.success) {
     throw createAppError(
@@ -54,14 +64,14 @@ export async function dispatchToolCall(
     );
   }
 
-  // 5. Run the handler with retry/backoff.
+  // 6. Run the handler with retry/backoff.
   return withRetry(() => tool.handler(parseResult.data, ctx), deps.retryOptions);
 }
 
 function extractToken(meta: Record<string, unknown> | undefined): string {
   const raw = meta?.authorization;
   if (typeof raw !== "string") return "";
-  return raw.replace(/^Bearer\s+/i, "").trim();
+  return extractBearerToken(raw);
 }
 
 export function createServer(deps?: Partial<DispatchDeps>): Server {
@@ -87,6 +97,7 @@ export function createServer(deps?: Partial<DispatchDeps>): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name } = request.params;
+    const requestId = randomUUID();
     const token = extractToken(
       request.params._meta as Record<string, unknown> | undefined,
     );
@@ -100,10 +111,13 @@ export function createServer(deps?: Partial<DispatchDeps>): Server {
       return result as CallToolResult;
     } catch (err) {
       const code = isAppError(err) ? err.code : "INTERNAL_ERROR";
-      const message = err instanceof Error ? err.message : String(err);
-      log("error", "tool call failed", { tool: name, code, message });
+      // Full detail (which may include AWS/internal messages) is logged
+      // server-side only. The caller receives a stable code + requestId so an
+      // operator can correlate, but no raw error text is leaked.
+      const detail = err instanceof Error ? err.message : String(err);
+      log("error", "tool call failed", { requestId, tool: name, code, detail });
       return {
-        content: [{ type: "text", text: `${code}: ${message}` }],
+        content: [{ type: "text", text: JSON.stringify({ error: code, requestId }) }],
         isError: true,
       } as CallToolResult;
     }

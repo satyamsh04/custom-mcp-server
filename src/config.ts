@@ -43,7 +43,20 @@ const envSchema = z.object({
     .transform((v) => (v === undefined || v === "" ? "info" : v)),
 });
 
+// Memoized per env object reference so handlers don't re-parse process.env on
+// every tool invocation. Tests that mutate the environment can call
+// resetConfigCache() to force a fresh parse.
+let cache: { env: NodeJS.ProcessEnv; config: AppConfig } | undefined;
+
+export function resetConfigCache(): void {
+  cache = undefined;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  if (cache !== undefined && cache.env === env) {
+    return cache.config;
+  }
+
   const parsed = envSchema.safeParse(env);
 
   if (!parsed.success) {
@@ -54,7 +67,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   const e = parsed.data;
-  return {
+  const config: AppConfig = {
     awsRegion: e.AWS_REGION,
     s3Bucket: e.S3_BUCKET_NAME,
     dynamoTable: e.DYNAMO_TABLE_NAME,
@@ -69,4 +82,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     retryBaseDelayMs: e.RETRY_BASE_DELAY_MS,
     logLevel: e.LOG_LEVEL,
   };
+
+  cache = { env, config };
+  return config;
 }

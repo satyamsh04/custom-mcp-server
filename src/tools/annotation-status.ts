@@ -7,6 +7,7 @@ import {
 import { getSlackClient } from "../clients/slack-client.js";
 import { loadConfig } from "../config.js";
 import { createAppError, isAppError } from "../errors.js";
+import { OWNER_ATTR, assertScopes, sanitizeSlackText } from "../security.js";
 import type { AuthContext, ToolModule, ToolResult } from "../types.js";
 
 const STATUSES = ["pending", "in_progress", "completed", "rejected"] as const;
@@ -55,10 +56,20 @@ const definition = {
 
 async function handler(
   input: AnnotationStatusInput,
-  _ctx: AuthContext,
+  ctx: AuthContext,
 ): Promise<ToolResult> {
   const config = loadConfig();
   const client = getDynamoClient();
+
+  // INTENTIONAL dual-scope pattern: the module declares `annotation:read` as
+  // its dispatch-level requiredScope (so any caller can read). Mutating the
+  // status additionally requires `annotation:write`, asserted here because the
+  // requirement is conditional on `newStatus` being present and so cannot be
+  // expressed in the static `requiredScopes` list. Do NOT remove this check as
+  // "redundant" — the dispatcher does not know about the write path.
+  if (input.newStatus !== undefined) {
+    assertScopes(ctx, ["annotation:write"]);
+  }
 
   try {
     const res = await client.send(
@@ -68,7 +79,9 @@ async function handler(
       }),
     );
 
-    if (res.Item === undefined) {
+    // Records owned by another principal are reported as not-found to avoid
+    // leaking the existence of foreign task IDs.
+    if (res.Item === undefined || res.Item[OWNER_ATTR] !== ctx.subject) {
       throw createAppError(
         "ANNOTATION_NOT_FOUND",
         `annotation task "${input.taskId}" not found`,
@@ -82,15 +95,18 @@ async function handler(
 
     if (input.newStatus !== undefined) {
       updatedAt = new Date().toISOString();
+      // Re-assert ownership at write time (guards the read→write TOCTOU gap).
       await client.send(
         new UpdateCommand({
           TableName: config.dynamoTable,
           Key: { id: input.taskId },
           UpdateExpression: "SET #s = :s, updatedAt = :u",
-          ExpressionAttributeNames: { "#s": "status" },
+          ConditionExpression: "#owner = :owner",
+          ExpressionAttributeNames: { "#s": "status", "#owner": OWNER_ATTR },
           ExpressionAttributeValues: {
             ":s": input.newStatus,
             ":u": updatedAt,
+            ":owner": ctx.subject,
           },
         }),
       );
@@ -100,7 +116,9 @@ async function handler(
     if (input.notify === true) {
       await getSlackClient().chat.postMessage({
         channel: config.slackDefaultChannel,
-        text: `Annotation task ${input.taskId} status: ${status}`,
+        text: sanitizeSlackText(
+          `Annotation task ${input.taskId} status: ${status}`,
+        ),
       });
     }
 
@@ -115,5 +133,10 @@ async function handler(
   }
 }
 
-const tool: ToolModule<AnnotationStatusInput> = { definition, schema, handler };
+const tool: ToolModule<AnnotationStatusInput> = {
+  definition,
+  requiredScopes: ["annotation:read"],
+  schema,
+  handler,
+};
 export default tool;
