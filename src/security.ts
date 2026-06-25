@@ -8,6 +8,10 @@ export const OWNER_ATTR = "owner";
 // Prevents memory-exhaustion DoS from oversized payloads.
 export const MAX_OBJECT_BYTES = 10 * 1024 * 1024;
 
+// Maximum serialized size of a DynamoDB item. DynamoDB's hard limit is 400 KB;
+// we cap below that to leave headroom and bound per-request work.
+export const MAX_ITEM_BYTES = 350 * 1024;
+
 // Throws FORBIDDEN unless the caller holds every required scope.
 export function assertScopes(ctx: AuthContext, required: string[]): void {
   const missing = required.filter((s) => !ctx.scopes.includes(s));
@@ -46,10 +50,15 @@ export function scopedObjectKey(ctx: AuthContext, key: string): string {
   return `${ctx.subject}/${sanitizeObjectKey(key)}`;
 }
 
-// Strips Slack control characters and neutralizes broadcast mentions so
-// user-supplied text cannot inject formatting or @channel/@here pings.
+// Escapes the three characters Slack treats as markup control characters and
+// neutralizes broadcast mentions. Escaping (rather than deleting) `<`/`>`
+// preserves character balance and, critically, prevents `<URL|label>` link
+// injection (e.g. `<javascript:...|click me>`) because the angle brackets can
+// no longer open a Slack link. `&` is escaped first to avoid double-encoding.
 export function sanitizeSlackText(text: string): string {
   return text
-    .replace(/[<>]/g, "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
     .replace(/@(channel|here|everyone)/gi, "@\u200b$1");
 }

@@ -11,9 +11,12 @@ export interface SlackNotifyInput {
   threadTs?: string;
 }
 
+// 4000 chars is a sane notification cap well under Slack's 40k hard limit.
+const MAX_MESSAGE_CHARS = 4000;
+
 export const schema = z
   .object({
-    message: z.string().min(1),
+    message: z.string().min(1).max(MAX_MESSAGE_CHARS),
     channel: z.string().optional(),
     threadTs: z.string().optional(),
   })
@@ -28,6 +31,7 @@ const definition = {
       message: {
         type: "string",
         minLength: 1,
+        maxLength: MAX_MESSAGE_CHARS,
         description: "Text to post to Slack",
       },
       channel: {
@@ -48,7 +52,6 @@ async function handler(
   input: SlackNotifyInput,
   _ctx: AuthContext,
 ): Promise<ToolResult> {
-  void _ctx;
   const config = loadConfig();
   const channel = input.channel ?? config.slackDefaultChannel;
 

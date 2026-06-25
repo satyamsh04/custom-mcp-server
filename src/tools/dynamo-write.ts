@@ -2,7 +2,7 @@ import { z } from "zod";
 import { getDynamoClient, PutCommand } from "../clients/dynamo-client.js";
 import { loadConfig } from "../config.js";
 import { createAppError, isAppError } from "../errors.js";
-import { OWNER_ATTR } from "../security.js";
+import { MAX_ITEM_BYTES, OWNER_ATTR } from "../security.js";
 import type { AuthContext, ToolModule, ToolResult } from "../types.js";
 
 export interface DynamoWriteInput {
@@ -54,6 +54,16 @@ async function handler(
   const overwrite = input.overwrite ?? true;
   // Owner is stamped last so a caller cannot spoof it via `attributes`.
   const item = { ...input.attributes, id: input.id, [OWNER_ATTR]: ctx.subject };
+
+  // Guard against oversized items (DynamoDB hard-limits at 400 KB; we cap
+  // lower). Rough byte estimate via JSON serialization of the attributes.
+  if (Buffer.byteLength(JSON.stringify(item), "utf8") > MAX_ITEM_BYTES) {
+    throw createAppError(
+      "PAYLOAD_TOO_LARGE",
+      `item exceeds ${MAX_ITEM_BYTES} bytes`,
+      false,
+    );
+  }
 
   // overwrite=false → create-only (fail if id exists at all).
   // overwrite=true  → create OR update only records the caller owns.

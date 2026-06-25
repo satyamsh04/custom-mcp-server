@@ -120,6 +120,9 @@ export async function validateJwt(
         clockTolerance: CLOCK_TOLERANCE_SEC,
       }) as JwtPayload;
     } else {
+      // Defensive: config.ts already requires JWKS_URI, but oauth reads
+      // process.env directly (it is not wired through loadConfig), so we
+      // re-check here rather than assume the validated config ran.
       if (jwksUri === undefined || jwksUri === "") {
         throw new Error("JWKS_URI must be configured for RS256 verification");
       }

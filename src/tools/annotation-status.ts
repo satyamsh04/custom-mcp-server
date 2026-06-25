@@ -61,8 +61,12 @@ async function handler(
   const config = loadConfig();
   const client = getDynamoClient();
 
-  // Mutating the status requires an additional write scope beyond the read
-  // scope enforced by the dispatcher.
+  // INTENTIONAL dual-scope pattern: the module declares `annotation:read` as
+  // its dispatch-level requiredScope (so any caller can read). Mutating the
+  // status additionally requires `annotation:write`, asserted here because the
+  // requirement is conditional on `newStatus` being present and so cannot be
+  // expressed in the static `requiredScopes` list. Do NOT remove this check as
+  // "redundant" — the dispatcher does not know about the write path.
   if (input.newStatus !== undefined) {
     assertScopes(ctx, ["annotation:write"]);
   }

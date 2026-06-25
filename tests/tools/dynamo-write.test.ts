@@ -50,6 +50,19 @@ describe("dynamo_write", () => {
     expect(calls[0]!.args[0].input.Item!.owner).toBe("user-1");
   });
 
+  it("rejects items that exceed the size cap", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    const big = "x".repeat(400 * 1024);
+    try {
+      await tool.handler({ id: "t1", attributes: { big } }, ctx);
+      fail("expected PAYLOAD_TOO_LARGE");
+    } catch (e) {
+      expect(isAppError(e)).toBe(true);
+      if (isAppError(e)) expect(e.code).toBe("PAYLOAD_TOO_LARGE");
+    }
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
   it("maps conditional failure to FORBIDDEN when overwriting", async () => {
     const err = new Error("exists");
     err.name = "ConditionalCheckFailedException";
